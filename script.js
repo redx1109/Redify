@@ -14,6 +14,82 @@ let favOrder = JSON.parse(localStorage.getItem('redify-favorder')||'[]');
 // ── FIXED: cache for YT search results ───────────────────────────────────────
 const _cache = {};
 
+// ── Background playback: Media Session + silent keep-alive ───────────────────
+const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAAAAAA==';
+let keepAliveAudio = null;
+let keepAliveStarted = false;
+
+function startKeepAlive(){
+  if(keepAliveStarted) return;
+  try{
+    keepAliveAudio = new Audio(SILENT_WAV);
+    keepAliveAudio.loop = true;
+    keepAliveAudio.volume = 0.01;
+    keepAliveAudio.play().then(()=>{ keepAliveStarted = true; }).catch(()=>{});
+  }catch(e){}
+}
+
+function setMediaSessionState(state){
+  if(!('mediaSession' in navigator)) return;
+  try{ navigator.mediaSession.playbackState = state; }catch(e){}
+}
+
+function updateMediaSession(song){
+  if(!('mediaSession' in navigator) || !song) return;
+  try{
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: song.title || 'Unknown',
+      artist: song.artist || 'Unknown',
+      album: 'Redify',
+      artwork: song.thumb ? [{ src: song.thumb, sizes: '512x512', type: 'image/jpeg' }] : []
+    });
+  }catch(e){}
+}
+
+function setupMediaSessionHandlers(){
+  if(!('mediaSession' in navigator)) return;
+  const H = {
+    play:          ()=>{ if(currentSong && !isPlaying) togglePlay(); },
+    pause:         ()=>{ if(isPlaying) togglePlay(); },
+    previoustrack: ()=>prevSong(),
+    nexttrack:     ()=>nextSong(),
+    seekbackward:  (d)=>{ if(ytPlayer&&ytReady) ytPlayer.seekTo(Math.max(0,(ytPlayer.getCurrentTime()||0)-(d.seekOffset||10)),true); },
+    seekforward:   (d)=>{ if(ytPlayer&&ytReady) ytPlayer.seekTo((ytPlayer.getCurrentTime()||0)+(d.seekOffset||10),true); },
+    seekto:        (d)=>{ if(ytPlayer&&ytReady&&d.seekTime!=null) ytPlayer.seekTo(d.seekTime,true); },
+  };
+  for(const [a,h] of Object.entries(H)){
+    try{ navigator.mediaSession.setActionHandler(a,h); }catch(e){}
+  }
+}
+
+// Re-sync player state when returning to foreground
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden || !ytReady || !ytPlayer || !currentSong) return;
+  try{
+    const st = ytPlayer.getPlayerState();
+    if(st === YT.PlayerState.PLAYING && !isPlaying){ isPlaying=true; updatePlayBtn(); setMediaSessionState('playing'); }
+    else if((st===YT.PlayerState.PAUSED||st===YT.PlayerState.CUED) && isPlaying){ ytPlayer.playVideo(); }
+  }catch(e){}
+});
+
+function onYTStateChange(e){
+  if(e.data===YT.PlayerState.PLAYING){
+    isPlaying=true; updatePlayBtn();
+    setMediaSessionState('playing');
+    if(!progressInterval) progressInterval=setInterval(updateProgress,500);
+  } else if(e.data===YT.PlayerState.PAUSED){
+    isPlaying=false; updatePlayBtn();
+    setMediaSessionState('paused');
+  } else if(e.data===YT.PlayerState.ENDED){
+    clearInterval(progressInterval); progressInterval=null;
+    isPlaying=false; updatePlayBtn();
+    setMediaSessionState('paused');
+    if(repeatOn){ ytPlayer.seekTo(0); ytPlayer.playVideo(); }
+    else nextSong();
+  }
+}
+
+
 function getFavs(){
   favOrder = favOrder.filter(id=>likedSongs[id]);
   Object.keys(likedSongs).forEach(id=>{ if(!favOrder.includes(id)) favOrder.push(id); });
@@ -96,6 +172,11 @@ function updateProgress(){
     document.getElementById('progFill').style.width=(cur/dur*100)+'%';
     document.getElementById('progCur').textContent=fmt(cur);
     document.getElementById('progEnd').textContent=fmt(dur);
+    if('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession){
+      try{
+        navigator.mediaSession.setPositionState({ duration: dur, playbackRate: 1, position: Math.min(cur, dur) });
+      }catch(e){}
+    }
   } catch(e){}
 }
 
@@ -247,6 +328,8 @@ function playSong(id, videoId){
   if(!song) return;
   if(!ytReady||!ytPlayer){ setTimeout(()=>playSong(id),600); return; }
   currentSong=song; 
+  startKeepAlive();
+  updateMediaSession(song);
   if(currentView!=='playlist') currentPlaylistView=null;
   let recent = JSON.parse(localStorage.getItem('redify-recent')||'[]');
   recent = [song, ...recent.filter(s=>s.videoId!==song.videoId)].slice(0,10);
@@ -278,6 +361,7 @@ function playSong(id, videoId){
 
 function togglePlay(){
   if(!currentSong||!ytReady||!ytPlayer) return;
+  startKeepAlive();  // no-op if already started
   if(isPlaying) ytPlayer.pauseVideo();
   else ytPlayer.playVideo();
 }
@@ -597,10 +681,11 @@ function enableTouchReorder(container, getArr, onSave){
 document.addEventListener('DOMContentLoaded',()=>{
   buildViz();
   vizInterval=setInterval(animateViz,140);
+  setupMediaSessionHandlers();   // ← add this
   renderPlaylists();
   initSongs().then(()=>navTo('discover', document.getElementById('nav-discover')));
   if(!currentSong) document.querySelector('.player').classList.add('no-song');
-  });
+});
 
 document.getElementById('plModal')?.addEventListener('click', function(e){
   if(e.target===this) closePlModal();
