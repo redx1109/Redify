@@ -15,16 +15,27 @@ let favOrder = JSON.parse(localStorage.getItem('redify-favorder')||'[]');
 const _cache = {};
 
 // ── Background playback: Media Session + silent keep-alive ───────────────────
-const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAAAAAA==';
+function makeSilentWav(){
+  const sr=8000, n=sr*2, b=new ArrayBuffer(44+n), v=new DataView(b);
+  const w=(o,s)=>[...s].forEach((c,i)=>v.setUint8(o+i,c.charCodeAt(0)));
+  w(0,'RIFF');v.setUint32(4,36+n,true);w(8,'WAVEfmt ');v.setUint32(16,16,true);
+  v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,sr,true);
+  v.setUint32(28,sr,true);v.setUint16(32,1,true);v.setUint16(34,8,true);
+  w(36,'data');v.setUint32(40,n,true);
+  new Uint8Array(b,44).fill(128);
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+}
+let userPaused=false;
+
 let keepAliveAudio = null;
 let keepAliveStarted = false;
 
 function startKeepAlive(){
   if(keepAliveStarted) return;
   try{
-    keepAliveAudio = new Audio(SILENT_WAV);
+    keepAliveAudio = new Audio(makeSilentWav());
     keepAliveAudio.loop = true;
-    keepAliveAudio.volume = 0.01;
+    keepAliveAudio.volume = 1;
     keepAliveAudio.play().then(()=>{ keepAliveStarted = true; }).catch(()=>{});
   }catch(e){}
 }
@@ -85,6 +96,7 @@ function onYTStateChange(e){
   } else if(e.data===YT.PlayerState.PAUSED){
     isPlaying=false; updatePlayBtn();
     setMediaSessionState('paused');
+    if(document.hidden && !userPaused) setTimeout(()=>{ try{ytPlayer.playVideo();}catch(e){} },150);
   } else if(e.data===YT.PlayerState.ENDED){
     clearInterval(progressInterval); progressInterval=null;
     isPlaying=false; updatePlayBtn();
@@ -353,8 +365,8 @@ function playSong(id, videoId){
 function togglePlay(){
   if(!currentSong||!ytReady||!ytPlayer) return;
   startKeepAlive();  // no-op if already started
-  if(isPlaying) ytPlayer.pauseVideo();
-  else ytPlayer.playVideo();
+  if(isPlaying){ userPaused=true; ytPlayer.pauseVideo(); }
+  else { userPaused=false; ytPlayer.playVideo(); }
 }
 
 function nextSong(){
